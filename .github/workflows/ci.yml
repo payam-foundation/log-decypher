@@ -1,0 +1,145 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      # testdata/golden.txt is the format contract: a release must keep opening it.
+      - run: go test -race -count=1 ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.1 ./...
+      - name: fuzz smoke
+        run: |
+          for pkg in $(go list ./...); do
+            for f in $(go test -list 'Fuzz.*' "$pkg" | grep '^Fuzz' || true); do
+              go test -run '^$' -fuzz "^$f\$" -fuzztime 20s "$pkg"
+            done
+          done
+
+  # HPKE MLKEM768X25519 must work on every platform a sender or operator uses.
+  platforms:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./seal ./envelope ./armor
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - run: go run github.com/securego/gosec/v2/cmd/gosec@v2.30.0 -severity=high -exclude=G115,G404 -exclude-generated ./...
+      - name: gitleaks
+        run: |
+          v=8.30.1
+          curl -sSfL -o "$RUNNER_TEMP/gl.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gl.tgz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/gl.tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --no-banner -v .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  cross:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        target: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64, android/arm64, android/amd64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - env:
+          CGO_ENABLED: "0"
+        run: |
+          export GOOS=${{ matrix.target }}; GOOS=${GOOS%/*}
+          export GOARCH=${{ matrix.target }}; GOARCH=${GOARCH#*/}
+          # Senders link only the public packages; the operator tool is not built for Android.
+          go build -trimpath ./seal ./envelope ./armor
+          case "$GOOS" in android) ;; *) go build -trimpath -o /dev/null ./cmd/decypher ;; esac
+
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=sign,sbom
+
+  release:
+    needs: [test, platforms, security, cross, snapshot]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write # keyless cosign signature
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: "~> v2"
+          args: release --clean --skip=validate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

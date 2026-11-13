@@ -1,0 +1,11 @@
+/dist/
+*.test
+*.out
+.env
+*.key
+*.keyring
+.DS_Store
+.idea/
+.vscode/
+go.work
+go.work.sum

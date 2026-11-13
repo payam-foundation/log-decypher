@@ -1,0 +1,49 @@
+version: 2
+
+project_name: log-decypher
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: decypher
+    main: ./cmd/decypher
+    binary: decypher
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [binary]
+    name_template: "decypher_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: binary
+    documents: ["{{ .Binary }}_{{ .Os }}_{{ .Arch }}.spdx.json"]
+    cmd: syft
+    args: ["$artifact", "--output", "spdx-json=$document"]
+
+# Verify: cosign verify-blob --bundle checksums.txt.sigstore.json \
+#   --certificate-identity-regexp 'https://github.com/payam-foundation/log-decypher/' \
+#   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    args: ["sign-blob", "--yes", "--bundle=${signature}", "${artifact}"]
+    signature: "${artifact}.sigstore.json"
+
+changelog:
+  disable: true
+
+release:
+  draft: false
