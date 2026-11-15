@@ -448,7 +448,8 @@ func runHook(stderr io.Writer, cmdline, path string) {
 // promptPass reads the passphrase from LD_PASSPHRASE_FILE or the terminal.
 func promptPass(confirm bool) ([]byte, error) {
 	if f := os.Getenv("LD_PASSPHRASE_FILE"); f != "" {
-		b, err := os.ReadFile(f)
+		// Operator-chosen path from their own environment; not attacker input.
+		b, err := os.ReadFile(f) // #nosec G703 G304
 		if err != nil {
 			return nil, err
 		}
