@@ -1,0 +1,2 @@
+# Cipher name in a comment (ChaCha20-Poly1305), not a secret.
+170e17ffff2aeb68d4ad457140a45dfbfe0603cb:internal/keyring/keyring.go:generic-api-key:4
